@@ -218,24 +218,6 @@ rec {
         }
       ) intermediateDirectories;
 
-      # home directories that are not persisted themselves but require
-      # user-specific ownership and permissions on the persistent prefix
-      intermediateHomeRules =
-        if builtins.isNull stateConfig.inUser then [ ]
-        else [
-          {
-            "${concatPaths [
-              prefix
-              stateConfig.persistentStoragePath
-              stateConfig.home
-            ]}".d = {
-              user = stateConfig.username;
-              group = config.users.users.${stateConfig.username}.group;
-              mode = config.users.users.${stateConfig.username}.homeMode;
-            };
-          }
-        ];
-
       # files that are bind-mounted from the persistent prefix
       mountedFileRules = map (
         fileConfig:
@@ -364,7 +346,6 @@ rec {
       rules =
         mountedDirRules
         ++ intermediateDirRules
-        ++ intermediateHomeRules
         ++ symlinkedDirRules
         ++ mountedFileRules
         ++ symlinkedFileRules;

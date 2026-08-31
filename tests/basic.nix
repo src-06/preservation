@@ -243,11 +243,6 @@ in {
             expected = "0755 butz users"
             t.assertEqual(actual, expected, "unexpected file attributes")
 
-      with subtest("Unpreserved user home has same permissions and ownership on persistent prefix as actual user home"):
-          actual = machine.succeed("stat -c '0%a %U %G' /state/home/butz | tee /dev/stderr").strip()
-          expected = machine.succeed("stat -c '0%a %U %G' /home/butz | tee /dev/stderr").strip()
-          t.assertEqual(actual, expected, "unexpected file attributes")
-
       with subtest("Files preserved across reboots"):
         # write something in one of the preserved files
         teststring = "foobarbaz"
