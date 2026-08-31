@@ -1,7 +1,7 @@
 { config, lib, ... }:
 
 let
-  inherit (import ./lib.nix { inherit lib; })
+  inherit (import ./lib.nix { inherit lib config; })
     mkIntermediateUserDirectories
     concatTwoPaths
     ;
@@ -26,7 +26,7 @@ let
   };
 
   directoryPath =
-    attrs@{ defaultOwner, ... }:
+    attrs@{ defaultOwner, inUser ? null, ... }:
     {
       options = {
         directory = lib.mkOption {
@@ -39,7 +39,7 @@ let
           type = lib.types.enum [
             "bindmount"
             "symlink"
-            "_intermediate" # TODO find a better name. maybe "structure"?
+            "_intermediate"
           ];
           default = "bindmount";
           description = ''
@@ -85,9 +85,10 @@ let
           default =
             let
               isUserSymlink = attrs.config.how == "symlink" && attrs.config.user != "root";
+              hasInUser = !builtins.isNull inUser;
               notOnTopLevel = !builtins.isNull (builtins.match ".+/.*" attrs.config.directory);
             in
-            isUserSymlink && notOnTopLevel;
+            (isUserSymlink || hasInUser) && notOnTopLevel;
           description = ''
             Specify whether the parent directory of this directory shall be configured with
             custom ownership and permissions.
@@ -101,29 +102,33 @@ let
             {option}`parent.mode`.
 
             Defaults to `true` when {option}`how` is set to `symlink` and
-            {option}`user` is not `root`.
+            {option}`user` is not `root`, or when {option}`inUser` is set.
           '';
         };
         parent.user = lib.mkOption {
           type = lib.types.str;
-          default = defaultOwner;
+          default = if !builtins.isNull inUser then inUser else defaultOwner;
           description = ''
-            Specify the user that owns the parent directory of this file.
+            Specify the user that owns the parent directory of this directory.
           '';
         };
         parent.group = lib.mkOption {
           type = lib.types.str;
-          default = config.users.users.${defaultOwner}.group;
-          defaultText = "config.users.users.\${defaultOwner}.group";
+          default =
+            let
+              owner = if !builtins.isNull inUser then inUser else defaultOwner;
+            in
+            config.users.users.${owner}.group;
+          defaultText = "config.users.users.\${owner}.group";
           description = ''
-            Specify the group that owns the parent directory of this file.
+            Specify the group that owns the parent directory of this directory.
           '';
         };
         parent.mode = lib.mkOption {
           type = lib.types.str;
           default = "0755";
           description = ''
-            Specify the access mode of the parent directory of this file.
+            Specify the access mode of the parent directory of this directory.
             See the section `Mode` in {manpage}`tmpfiles.d(5)` for more information.
           '';
         };
@@ -163,18 +168,23 @@ let
             :::
           '';
         };
+        inUser = lib.mkOption {
+          type = with lib.types; nullOr str;
+          internal = true;
+          readOnly = true;
+        };
       };
 
       config = {
         mountOptions = [
           "bind"
-          "X-fstrim.notrim" # see fstrim(8)
+          "X-fstrim.notrim"
         ];
       };
     };
 
   filePath =
-    attrs@{ defaultOwner, ... }:
+    attrs@{ defaultOwner, inUser ? null, ... }:
     {
       options = {
         file = lib.mkOption {
@@ -228,9 +238,10 @@ let
           default =
             let
               isUserSymlink = attrs.config.how == "symlink" && attrs.config.user != "root";
+              hasInUser = !builtins.isNull inUser;
               notOnTopLevel = !builtins.isNull (builtins.match ".+/.*" attrs.config.file);
             in
-            isUserSymlink && notOnTopLevel;
+            (isUserSymlink || hasInUser) && notOnTopLevel;
           description = ''
             Specify whether the parent directory of this file shall be configured with
             custom ownership and permissions.
@@ -244,20 +255,24 @@ let
             {option}`parent.mode`.
 
             Defaults to `true` when {option}`how` is set to `symlink` and
-            {option}`user` is not `root`.
+            {option}`user` is not `root`, or when {option}`inUser` is set.
           '';
         };
         parent.user = lib.mkOption {
           type = lib.types.str;
-          default = defaultOwner;
+          default = if !builtins.isNull inUser then inUser else defaultOwner;
           description = ''
             Specify the user that owns the parent directory of this file.
           '';
         };
         parent.group = lib.mkOption {
           type = lib.types.str;
-          default = config.users.users.${attrs.defaultOwner}.group;
-          defaultText = "config.users.users.\${defaultOwner}.group";
+          default =
+            let
+              owner = if !builtins.isNull inUser then inUser else defaultOwner;
+            in
+            config.users.users.${owner}.group;
+          defaultText = "config.users.users.\${owner}.group";
           description = ''
             Specify the group that owns the parent directory of this file.
           '';
@@ -308,6 +323,11 @@ let
             :::
           '';
         };
+        inUser = lib.mkOption {
+          type = with lib.types; nullOr str;
+          internal = true;
+          readOnly = true;
+        };
       };
 
       config = {
@@ -317,24 +337,45 @@ let
       };
     };
 
-  userModule =
+  preserveAtSubmodule =
     attrs@{ name, ... }:
     {
       options = {
+        inUser = lib.mkOption {
+          type = with lib.types; nullOr str;
+          default = null;
+          description = ''
+            Specify the user that owns the directories and files under this
+            preservation prefix. When set, {option}`directories` and
+            {option}`files` paths are interpreted relative to the user's
+            home directory. The parent directory on persistent storage
+            will be configured with the user's ownership and permissions.
+
+            Defaults to `null` for system-level preservation.
+          '';
+          example = "alice";
+        };
         username = lib.mkOption {
           type = with lib.types; passwdEntry str;
-          default = name;
-          description = ''
-            Specify the user for which the {option}`directories` and {option}`files`
-            should be persisted. Defaults to the name of the parent attribute set.
-          '';
+          default = if builtins.isNull attrs.config.inUser then "root" else attrs.config.inUser;
+          internal = true;
+          readOnly = true;
         };
         home = lib.mkOption {
           type = with lib.types; passwdEntry path;
-          default = config.users.users.${attrs.config.username}.home;
-          defaultText = "config.users.users.\${name}.home";
+          default =
+            if builtins.isNull attrs.config.inUser then "/root"
+            else config.users.users.${attrs.config.inUser}.home;
+          defaultText = "config.users.users.\${inUser}.home";
+          internal = true;
+          readOnly = true;
+        };
+        persistentStoragePath = lib.mkOption {
+          type = lib.types.path;
+          default = name;
           description = ''
-            Specify the path to the user's home directory.
+            Specify the location at which the {option}`directories` and {option}`files`
+            should be preserved. Defaults to the name of the parent attribute set.
           '';
         };
         directories = lib.mkOption {
@@ -344,6 +385,7 @@ let
               coercedTo str (d: { directory = d; }) (submodule [
                 {
                   _module.args.defaultOwner = attrs.config.username;
+                  _module.args.inUser = attrs.config.inUser;
                   mountOptions = attrs.config.commonMountOptions;
                 }
                 directoryPath
@@ -360,106 +402,26 @@ let
                 group = config.users.users.${attrs.config.username}.group;
                 mode = "0755";
               };
-              allDirectories =
+              allWithIntermediates =
                 mkIntermediateUserDirectories intermediateDirectorySettings attrs.config.files attrs.config.home
                   definedDirectories;
             in
-            map (d: d // { directory = concatTwoPaths attrs.config.home d.directory; }) allDirectories;
-          description = ''
-            Specify a list of directories that should be preserved for this user.
-            The paths are interpreted relative to {option}`home`.
-          '';
-          example = [ ".rabbit_hole" ];
-        };
-        files = lib.mkOption {
-          type =
-            with lib.types;
-            listOf (
-              coercedTo str (f: { file = f; }) (submodule [
-                {
-                  _module.args.defaultOwner = attrs.config.username;
-                  mountOptions = attrs.config.commonMountOptions;
-                }
-                filePath
-              ])
-            );
-          default = [ ];
-          apply = map (f: f // { file = concatTwoPaths attrs.config.home f.file; });
-          description = ''
-            Specify a list of files that should be preserved for this user.
-            The paths are interpreted relative to {option}`home`.
-          '';
-          example = lib.literalMD ''
-            ```nix
-            [
-              {
-                file = ".config/foo";
-                mode = "0600";
-              }
-              "bar"
-            ]
-            ```
-          '';
-        };
-        commonMountOptions = lib.mkOption {
-          type = with lib.types; listOf (coercedTo str (n: { name = n; }) mountOption);
-          default = [ ];
-          example = [
-            "x-gvfs-hide"
-            "x-gdu.hide"
-          ];
-          description = ''
-            Specify a list of mount options that should be added to all files and directories
-            of this user, for which {option}`how` is set to `bindmount`.
-
-            See also the top level {option}`commonMountOptions` and the invdividual
-            {option}`mountOptions` that is available per file / directory.
-          '';
-        };
-        homeMode = lib.mkOption {
-          type = lib.types.str;
-          default = config.users.users.${attrs.config.username}.homeMode;
-          internal = true;
-          readOnly = true;
-        };
-        homeGroup = lib.mkOption {
-          type = lib.types.str;
-          default = config.users.users.${attrs.config.username}.group;
-          internal = true;
-          readOnly = true;
-        };
-      };
-    };
-
-  preserveAtSubmodule =
-    attrs@{ name, ... }:
-    {
-      options = {
-        persistentStoragePath = lib.mkOption {
-          type = lib.types.path;
-          default = name;
-          description = ''
-            Specify the location at which the {option}`directories`, {option}`files`,
-            {option}`users.directories` and {option}`users.files` should be preserved.
-            Defaults to the name of the parent attribute set.
-          '';
-        };
-        directories = lib.mkOption {
-          type =
-            with lib.types;
-            listOf (
-              coercedTo str (d: { directory = d; }) (submodule [
-                {
-                  _module.args.defaultOwner = "root";
-                  mountOptions = attrs.config.commonMountOptions;
-                }
-                directoryPath
-              ])
-            );
-          default = [ ];
+            if builtins.isNull attrs.config.inUser then
+              allWithIntermediates
+            else
+              let
+                # Split into original dirs and generated intermediates
+                originalDirs = map (d: d // { directory = concatTwoPaths attrs.config.home d.directory; })
+                  (builtins.filter (d: d.how != "_intermediate") allWithIntermediates);
+                intermediates = map (d: d // { directory = concatTwoPaths attrs.config.home d.directory; })
+                  (builtins.filter (d: d.how == "_intermediate") allWithIntermediates);
+              in
+              originalDirs ++ intermediates;
           description = ''
             Specify a list of directories that should be preserved.
-            The paths are interpreted as absolute paths.
+            The paths are interpreted as absolute paths for system entries
+            (when {option}`inUser` is `null`), or relative to the user's
+            home directory when {option}`inUser` is set.
           '';
           example = [ "/var/lib/someservice" ];
         };
@@ -469,16 +431,24 @@ let
             listOf (
               coercedTo str (f: { file = f; }) (submodule [
                 {
-                  _module.args.defaultOwner = "root";
+                  _module.args.defaultOwner = attrs.config.username;
+                  _module.args.inUser = attrs.config.inUser;
                   mountOptions = attrs.config.commonMountOptions;
                 }
                 filePath
               ])
             );
           default = [ ];
+          apply =
+            if builtins.isNull attrs.config.inUser then
+              lib.id
+            else
+              map (f: f // { file = concatTwoPaths attrs.config.home f.file; });
           description = ''
             Specify a list of files that should be preserved.
-            The paths are interpreted as absolute paths.
+            The paths are interpreted as absolute paths for system entries
+            (when {option}`inUser` is `null`), or relative to the user's
+            home directory when {option}`inUser` is set.
           '';
           example = lib.literalMD ''
             ```nix
@@ -495,39 +465,6 @@ let
             ```
           '';
         };
-        users = lib.mkOption {
-          type =
-            with lib.types;
-            attrsWith {
-              placeholder = "user";
-              elemType = submodule [
-                { commonMountOptions = attrs.config.commonMountOptions; }
-                userModule
-              ];
-            };
-          default = { };
-          description = ''
-            Specify a set of users with corresponding files and directories that
-            should be preserved.
-          '';
-          example = lib.literalMD ''
-            ```nix
-            {
-              alice.directories = [ ".rabbit_hole" ];
-              butz = {
-                files = [
-                  {
-                    file = ".config/foo";
-                    mode = "0600";
-                  }
-                  "bar"
-                ];
-                directories = [ "unshaved_yaks" ];
-              };
-            }
-            ```
-          '';
-        };
         commonMountOptions = lib.mkOption {
           type = with lib.types; listOf (coercedTo str (n: { name = n; }) mountOption);
           default = [ ];
@@ -539,7 +476,7 @@ let
             Specify a list of mount options that should be added to all files and directories
             under this preservation prefix, for which {option}`how` is set to `bindmount`.
 
-            See also {option}`commonMountOptions` under {option}`users` and the invdividual
+            See also the individual
             {option}`mountOptions` that is available per file / directory.
           '';
         };
@@ -578,19 +515,21 @@ in
                 inInitrd = true;
               }
             ];
-            users = {
-              alice.directories = [ ".rabbit_hole" ];
-              butz = {
-                files = [
-                  {
-                    file = ".config/foo";
-                    mode = "0600";
-                  }
-                  "bar"
-                ];
-                directories = [ "unshaved_yaks" ];
-              };
-            };
+          };
+          "/state/home-alice" = {
+            inUser = "alice";
+            directories = [ ".rabbit_hole" ".config/kitty" ];
+          };
+          "/state/home-butz" = {
+            inUser = "butz";
+            directories = [ "unshaved_yaks" ];
+            files = [
+              {
+                file = ".config/foo";
+                mode = "0600";
+              }
+              "bar"
+            ];
           };
         }
         ```
