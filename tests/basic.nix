@@ -1,131 +1,160 @@
-pkgs:
-let
+pkgs: let
   inherit (pkgs) lib;
-  preservationLib = import ../lib.nix { inherit lib; };
-in
-{
+  preservationLib = import ../lib.nix {inherit lib;};
+in {
   name = "preservation-basic";
 
-  nodes.machine =
-    { pkgs, ... }:
-    {
-      # import the preservation module
-      imports = [ ../module.nix ];
+  nodes.machine = {pkgs, ...}: {
+    # import the preservation module
+    imports = [../module.nix];
 
-      # module configuration
-      preservation = {
-        # global enable switch
-        enable = true;
-        # all files and directories are preserved under "/state" in this test
-        preserveAt."/state" = {
-          commonMountOptions = [
-            "x-foo"
-          ];
-          directories = [
-            "/var/lib/someservice"
-            "/var/log"
-          ];
-          files = [
-            { file = "/etc/wpa_supplicant.conf"; how = "symlink"; }
-            # some files need to be prepared very early, machine-id is one such case
-            { file = "/etc/machine-id"; inInitrd = true; }
-            # persist SSH host keys
-            { file = "/etc/ssh/ssh_host_rsa_key"; how = "symlink"; configureParent = true; }
-            { file = "/etc/ssh/ssh_host_ed25519_key"; how = "symlink"; configureParent = true; }
-          ];
-          # per-user configuration is possible
-          # similar to impermanence this configures ownership for the respective users
-          users = {
-            alice = {
-              directories = [
-                ".rabbit_hole"
-              ];
-            };
-            butz = {
-              commonMountOptions = [
-                "x-bar"
-              ];
-              files = [
-                { file = ".config/foo"; mode = "0600"; }
-                "bar"
-                # an empty file with may be created at the symlink's
-                # target, i.e. on the persistent volume
-                { file = ".symlinks/baz"; how = "symlink"; createLinkTarget = true; }
-                # this file should be mounted and with the combination of all three
-                # configured `x-foo`, `x-bar` and `x-baz`.
-                { file = "yay_userspace_mount_options"; mountOptions = [ "x-baz" ]; }
-                # a symlinked file in the user's home directory
-                { file = ".toplevel_symlink"; how = "symlink"; }
-              ];
-              directories = [
-                "unshaved_yaks"
-                "foo/bar/baz"
-                { directory = "symlinked_user_dir"; how = "symlink"; }
-              ];
-            };
-          };
-        };
+    # module configuration
+    preservation = {
+      # global enable switch
+      enable = true;
+      # all files and directories are preserved under "/state" in this test
+      preserveAt."/state" = {
+        commonMountOptions = [
+          "x-foo"
+        ];
+        directories = [
+          "/var/lib/someservice"
+          "/var/log"
+        ];
+        files = [
+          {
+            file = "/etc/wpa_supplicant.conf";
+            how = "symlink";
+          }
+          # some files need to be prepared very early, machine-id is one such case
+          {
+            file = "/etc/machine-id";
+            inInitrd = true;
+          }
+          # persist SSH host keys
+          {
+            file = "/etc/ssh/ssh_host_rsa_key";
+            how = "symlink";
+            configureParent = true;
+          }
+          {
+            file = "/etc/ssh/ssh_host_ed25519_key";
+            how = "symlink";
+            configureParent = true;
+          }
+        ];
       };
-
-      # systemd-machine-id-commit.service would fail, but it is not relevant
-      # in this specific setup for a persistent machine-id so we disable it
-      systemd.suppressedSystemUnits = [ "systemd-machine-id-commit.service" ];
-
-      # to test sshd with preserved host keys
-      services.openssh.enable = true;
-
-      # test-specific configuration below
-
-      testing.initrdBackdoor = true;
-      boot.initrd.systemd = {
-        enable = true;
-        extraBin = {
-          mountpoint = "${pkgs.util-linux}/bin/mountpoint";
-        };
+      # per-user configuration using inUser
+      preserveAt."/state/alice" = {
+        persistentStoragePath = "/state";
+        inUser = "alice";
+        directories = [
+          ".rabbit_hole"
+          ".config/kitty"
+          ".local/share/fish"
+          ".locale/state/wireplumber"
+        ];
       };
-      networking.useNetworkd = true;
-
-      users.users = {
-        alice = {
-          isNormalUser = true;
-          # custom home directory
-          home = "/home/wonderland";
-        };
-        butz.isNormalUser = true;
+      preserveAt."/state/butz" = {
+        persistentStoragePath = "/state";
+        inUser = "butz";
+        commonMountOptions = [
+          "x-bar"
+        ];
+        files = [
+          {
+            file = ".config/foo";
+            mode = "0600";
+          }
+          "bar"
+          # an empty file with may be created at the symlink's
+          # target, i.e. on the persistent volume
+          {
+            file = ".symlinks/baz";
+            how = "symlink";
+            createLinkTarget = true;
+          }
+          # this file should be mounted and with the combination of all three
+          # configured `x-foo`, `x-bar` and `x-baz`.
+          {
+            file = "yay_userspace_mount_options";
+            mountOptions = ["x-baz"];
+          }
+          # a symlinked file in the user's home directory
+          {
+            file = ".toplevel_symlink";
+            how = "symlink";
+          }
+        ];
+        directories = [
+          "unshaved_yaks"
+          "foo/bar/baz"
+          {
+            directory = "symlinked_user_dir";
+            how = "symlink";
+          }
+        ];
       };
-
-      virtualisation = {
-        memorySize = 2048;
-        # separate block device for preserved state
-        emptyDiskImages = [ 23 ];
-        fileSystems."/state" = {
-          device = "/dev/vdb";
-          fsType = "ext4";
-          neededForBoot = true;
-          autoFormat = true;
-        };
-      };
-
     };
 
-  testScript =
-    { nodes, ... }:
-    let
-      butzHome = nodes.machine.users.users.butz.home;
+    # systemd-machine-id-commit.service would fail, but it is not relevant
+    # in this specific setup for a persistent machine-id so we disable it
+    systemd.suppressedSystemUnits = ["systemd-machine-id-commit.service"];
 
-      allFiles = lib.flatten (
-        lib.mapAttrsToList (_: preservationLib.getAllFiles) nodes.machine.preservation.preserveAt
-      );
-      allDirs = lib.flatten (
-        lib.mapAttrsToList (_: preservationLib.getAllDirectories) nodes.machine.preservation.preserveAt
-      );
-      initrdFiles = builtins.filter (conf: conf.inInitrd) allFiles;
-      initrdDirs = builtins.filter (conf: conf.inInitrd) allDirs;
-      initrdJSON = builtins.toJSON (initrdDirs ++ initrdFiles);
-      allJSON = builtins.toJSON (allDirs ++ allFiles);
-    in
+    # to test sshd with preserved host keys
+    services.openssh.enable = true;
+
+    # test-specific configuration below
+
+    testing.initrdBackdoor = true;
+    boot.initrd.systemd = {
+      enable = true;
+      extraBin = {
+        mountpoint = "${pkgs.util-linux}/bin/mountpoint";
+      };
+    };
+    networking.useNetworkd = true;
+
+    users.users = {
+      alice = {
+        isNormalUser = true;
+        # custom home directory
+        home = "/home/wonderland";
+      };
+      butz.isNormalUser = true;
+    };
+
+    virtualisation = {
+      memorySize = 2048;
+      # separate block device for preserved state
+      emptyDiskImages = [23];
+      fileSystems."/state" = {
+        device = "/dev/vdb";
+        fsType = "ext4";
+        neededForBoot = true;
+        autoFormat = true;
+      };
+    };
+  };
+
+  testScript = {nodes, ...}: let
+    butzHome = nodes.machine.users.users.butz.home;
+
+    allFiles = lib.flatten (
+      lib.mapAttrsToList (_: preservationLib.getAllFiles) nodes.machine.preservation.preserveAt
+    );
+    allDirs = lib.flatten (
+      lib.mapAttrsToList (_: preservationLib.getAllDirectories) nodes.machine.preservation.preserveAt
+    );
+    initrdFiles = builtins.filter (conf: conf.inInitrd) allFiles;
+    initrdDirs = builtins.filter (conf: conf.inInitrd) allDirs;
+    initrdJSON = builtins.toJSON (initrdDirs ++ initrdFiles);
+    allJSON = builtins.toJSON (allDirs ++ allFiles);
+  in
     # (for syntax highlighting)
-    /* python */
+    /*
+    python
+    */
     ''
       import json
 

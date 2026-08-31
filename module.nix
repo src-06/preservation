@@ -3,7 +3,7 @@
 let
   cfg = config.preservation;
 
-  inherit (import ./lib.nix { inherit lib; })
+  inherit (import ./lib.nix { inherit lib config; })
     mkRegularMountUnits
     mkInitrdMountUnits
     mkRegularTmpfilesRules

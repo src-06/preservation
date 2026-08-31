@@ -1,4 +1,4 @@
-{ lib, ... }:
+{ lib, config ? { }, ... }:
 
 rec {
   # converts a list of `mountOption` to a comma-separated string that is passed to the mount unit
@@ -75,7 +75,7 @@ rec {
     in
     lib.lists.unique (builtins.filter (path: !(builtins.elem path paths)) intermediates);
 
-  # generates a list of attributes to be used in the `directories` option of the `userModule`
+  # generates a list of attributes to be used in the `directories` option
   #
   # essentially this takes the given lists of configurations for `directories` and `files`,
   # generates a list of all their unique parent paths and returns a single list of the
@@ -108,27 +108,28 @@ rec {
     in
     directories ++ initrdIntermediates ++ regularIntermediates;
 
-  # retrieves the list of directories for all users in a `userModule`
-  getUserDirectories = lib.mapAttrsToList (_: userConfig: userConfig.directories);
-  # retrieves the list of files for all users in a `userModule`
-  getUserFiles = lib.mapAttrsToList (_: userConfig: userConfig.files);
+  # adjusts a directory path for persistent storage when inUser is set
+  # strips the home directory prefix so the path is relative to persistentStoragePath
+  adjustPersistentDirPath =
+    stateConfig: dirConfig:
+    if builtins.isNull stateConfig.inUser then
+      dirConfig.directory
+    else
+      lib.removePrefix stateConfig.home dirConfig.directory;
+
+  # adjusts a file path for persistent storage when inUser is set
+  adjustPersistentFilePath =
+    stateConfig: fileConfig:
+    if builtins.isNull stateConfig.inUser then
+      fileConfig.file
+    else
+      lib.removePrefix stateConfig.home fileConfig.file;
+
   # retrieves all directories configured in a `preserveAtSubmodule`
-  getAllDirectories =
-    stateConfig:
-    stateConfig.directories ++ (builtins.concatLists (getUserDirectories stateConfig.users));
+  getAllDirectories = stateConfig: stateConfig.directories;
   # retrieves all files configured in a `preserveAtSubmodule`
-  getAllFiles =
-    stateConfig: stateConfig.files ++ (builtins.concatLists (getUserFiles stateConfig.users));
-  # retrieves the list of user configs that preserve any file or directory for all
-  # users in a `preserveAtSubmodule`
-  getNonEmptyUserConfigs =
-    forInitrd: stateConfig:
-    let
-      preservesAny =
-        userConfig: lib.any (def: def.inInitrd == forInitrd) (userConfig.files ++ userConfig.directories);
-      nonEmptyUsers = lib.filterAttrs (_: preservesAny) stateConfig.users;
-    in
-    lib.mapAttrsToList (_: userConfig: userConfig) nonEmptyUsers;
+  getAllFiles = stateConfig: stateConfig.files;
+
   # filters a list of files or directories, returns only bindmounts
   onlyBindMounts =
     forInitrd: builtins.filter (conf: conf.how == "bindmount" && conf.inInitrd == forInitrd);
@@ -145,7 +146,6 @@ rec {
     let
       allDirectories = getAllDirectories stateConfig;
       allFiles = getAllFiles stateConfig;
-      nonEmptyUserConfigs = getNonEmptyUserConfigs forInitrd stateConfig;
       mountedDirectories = onlyBindMounts forInitrd allDirectories;
       intermediateDirectories = onlyIntermediates forInitrd allDirectories;
       mountedFiles = onlyBindMounts forInitrd allFiles;
@@ -158,10 +158,11 @@ rec {
       mountedDirRules = map (
         dirConfig:
         let
+          adjustedDir = adjustPersistentDirPath stateConfig dirConfig;
           persistentDirPath = concatPaths [
             prefix
             stateConfig.persistentStoragePath
-            dirConfig.directory
+            adjustedDir
           ];
           volatileDirPath = concatPaths [
             prefix
@@ -194,10 +195,11 @@ rec {
       intermediateDirRules = map (
         dirConfig:
         let
+          adjustedDir = adjustPersistentDirPath stateConfig dirConfig;
           persistentDirPath = concatPaths [
             prefix
             stateConfig.persistentStoragePath
-            dirConfig.directory
+            adjustedDir
           ];
           volatileDirPath = concatPaths [
             prefix
@@ -218,33 +220,31 @@ rec {
 
       # home directories that are not persisted themselves but require
       # user-specific ownership and permissions on the persistent prefix
-      intermediateHomeRules = map (
-        userConfig:
-        let
-          persistentDirPath = concatPaths [
-            prefix
-            stateConfig.persistentStoragePath
-            userConfig.home
-          ];
-        in
-        {
-          "${persistentDirPath}".d = {
-            user = userConfig.username;
-            group = userConfig.homeGroup;
-            mode = userConfig.homeMode;
-          };
-        }
-
-      ) nonEmptyUserConfigs;
+      intermediateHomeRules =
+        if builtins.isNull stateConfig.inUser then [ ]
+        else [
+          {
+            "${concatPaths [
+              prefix
+              stateConfig.persistentStoragePath
+              stateConfig.home
+            ]}".d = {
+              user = stateConfig.username;
+              group = config.users.users.${stateConfig.username}.group;
+              mode = config.users.users.${stateConfig.username}.homeMode;
+            };
+          }
+        ];
 
       # files that are bind-mounted from the persistent prefix
       mountedFileRules = map (
         fileConfig:
         let
+          adjustedFile = adjustPersistentFilePath stateConfig fileConfig;
           persistentFilePath = concatPaths [
             prefix
             stateConfig.persistentStoragePath
-            fileConfig.file
+            adjustedFile
           ];
           volatileFilePath = concatPaths [
             prefix
@@ -253,19 +253,12 @@ rec {
         in
         {
           # file on persistent storage
-          "${concatPaths [
-            prefix
-            stateConfig.persistentStoragePath
-            fileConfig.file
-          ]}".f =
+          "${persistentFilePath}".f =
             {
               inherit (fileConfig) user group mode;
             };
           # file on volatile storage
-          "${concatPaths [
-            prefix
-            fileConfig.file
-          ]}".f =
+          "${volatileFilePath}".f =
             {
               inherit (fileConfig) user group mode;
             };
@@ -286,10 +279,11 @@ rec {
       symlinkedDirRules = map (
         dirConfig:
         let
+          adjustedDir = adjustPersistentDirPath stateConfig dirConfig;
           persistentDirPath = concatPaths [
             prefix
             stateConfig.persistentStoragePath
-            dirConfig.directory
+            adjustedDir
           ];
           volatileDirPath = concatPaths [
             prefix
@@ -302,7 +296,7 @@ rec {
             inherit (dirConfig) user group mode;
             argument = concatPaths [
               stateConfig.persistentStoragePath
-              dirConfig.directory
+              adjustedDir
             ];
           };
         }
@@ -328,10 +322,11 @@ rec {
       symlinkedFileRules = map (
         fileConfig:
         let
+          adjustedFile = adjustPersistentFilePath stateConfig fileConfig;
           persistentFilePath = concatPaths [
             prefix
             stateConfig.persistentStoragePath
-            fileConfig.file
+            adjustedFile
           ];
           volatileFilePath = concatPaths [
             prefix
@@ -344,7 +339,7 @@ rec {
             inherit (fileConfig) user group mode;
             argument = concatPaths [
               stateConfig.persistentStoragePath
-              fileConfig.file
+              adjustedFile
             ];
           };
         }
@@ -402,7 +397,7 @@ rec {
         what = concatPaths [
           prefix
           stateConfig.persistentStoragePath
-          directoryConfig.directory
+          (adjustPersistentDirPath stateConfig directoryConfig)
         ];
         unitConfig.DefaultDependencies = "no";
         conflicts = [ "umount.target" ];
@@ -444,14 +439,14 @@ rec {
         what = concatPaths [
           prefix
           stateConfig.persistentStoragePath
-          fileConfig.file
+          (adjustPersistentFilePath stateConfig fileConfig)
         ];
         unitConfig = {
           DefaultDependencies = "no";
           ConditionPathExists = concatPaths [
             prefix
             stateConfig.persistentStoragePath
-            fileConfig.file
+            (adjustPersistentFilePath stateConfig fileConfig)
           ];
         };
         conflicts = [ "umount.target" ];
